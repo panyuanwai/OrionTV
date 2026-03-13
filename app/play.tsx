@@ -147,7 +147,10 @@ export default function PlayScreen() {
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
+      logger.info(`[PERF] PlayScreen unmounting - unloading player and calling reset()`);
+      videoRef.current?.unloadAsync?.().catch((error) => {
+        logger.warn(`[CLEANUP] Failed to unload video on unmount`, error);
+      });
       reset(); // Reset state when component unmounts
     };
   }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
@@ -162,9 +165,21 @@ export default function PlayScreen() {
   }, [deviceType, tvRemoteHandler, setShowControls, showControls]);
 
   useEffect(() => {
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      if (nextAppState === "background" || nextAppState === "inactive") {
-        videoRef.current?.pauseAsync();
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      try {
+        if (nextAppState === "background" || nextAppState === "inactive") {
+          await videoRef.current?.pauseAsync();
+          return;
+        }
+
+        if (nextAppState === "active") {
+          const status = await videoRef.current?.getStatusAsync();
+          if (status?.isLoaded && !status.isPlaying) {
+            await videoRef.current?.playAsync();
+          }
+        }
+      } catch (error) {
+        logger.warn(`[APPSTATE] Failed to handle app state change: ${nextAppState}`, error);
       }
     };
 
