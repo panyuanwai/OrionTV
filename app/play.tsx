@@ -114,7 +114,8 @@ export default function PlayScreen() {
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
-  const consumeResumedFromBackground = useAppStateStore((state) => state.consumeResumedFromBackground);
+  const resumedFromBackground = useAppStateStore((state) => state.resumedFromBackground);
+  const clearResumedFromBackground = useAppStateStore((state) => state.clearResumedFromBackground);
 
   const [videoInstanceKey, setVideoInstanceKey] = useState(0);
   const [disableInitialSeek, setDisableInitialSeek] = useState(false);
@@ -301,15 +302,18 @@ export default function PlayScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      const resumedFromBackground = consumeResumedFromBackground();
       if (resumedFromBackground) {
-        logger.info("[APPSTATE] Global resume flag consumed in PlayScreen focus, forcing recreate");
+        logger.info("[APPSTATE] Global resume flag detected in PlayScreen focus, forcing recreate");
         forceRecreatePlayer("screen-focus");
+        // 仅在播放页真正完成一次恢复动作后再清标记，避免过早消费
+        setTimeout(() => {
+          clearResumedFromBackground();
+        }, 3000);
       } else {
         recoverPlayback("screen-focus");
       }
       return undefined;
-    }, [recoverPlayback, forceRecreatePlayer, consumeResumedFromBackground])
+    }, [resumedFromBackground, recoverPlayback, forceRecreatePlayer, clearResumedFromBackground])
   );
 
   useEffect(() => {

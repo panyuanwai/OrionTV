@@ -1,5 +1,6 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { useFonts } from "expo-font";
+import { Audio } from "expo-av";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef } from "react";
@@ -72,7 +73,7 @@ export default function RootLayout() {
 
   // 全局 AppState 监听：用于标记“刚从后台恢复”
   useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextState) => {
+    const subscription = AppState.addEventListener("change", async (nextState) => {
       const prevState = appStateRef.current;
       appStateRef.current = nextState;
 
@@ -82,6 +83,17 @@ export default function RootLayout() {
       if (resumedFromBackground) {
         logger.info("[APPSTATE] App resumed from background, mark global resume flag");
         markResumedFromBackground();
+
+        // Android TV 某些机型返回前台后 ExoPlayer 会进入假活跃状态，这里重置全局 Audio 引擎
+        if (Platform.OS === "android") {
+          try {
+            await Audio.setIsEnabledAsync(false);
+            await Audio.setIsEnabledAsync(true);
+            logger.info("[APPSTATE] Audio engine reset done after resume");
+          } catch (error) {
+            logger.warn("[APPSTATE] Audio engine reset failed", error);
+          }
+        }
       }
     });
 
