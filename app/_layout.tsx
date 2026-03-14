@@ -1,10 +1,10 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { useFonts } from "expo-font";
 import { Audio } from "expo-av";
-import { Stack } from "expo-router";
+import { Stack, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef } from "react";
-import { Platform, View, StyleSheet, AppState, AppStateStatus } from "react-native";
+import { Platform, View, StyleSheet, AppState, AppStateStatus, BackHandler } from "react-native";
 import Toast from "react-native-toast-message";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
@@ -35,6 +35,7 @@ export default function RootLayout() {
   const { checkForUpdate, lastCheckTime } = useUpdateStore();
   const { markResumedFromBackground } = useAppStateStore();
   const responsiveConfig = useResponsiveLayout();
+  const pathname = usePathname();
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
@@ -108,6 +109,24 @@ export default function RootLayout() {
       stopServer();
     }
   }, [remoteInputEnabled, startServer, stopServer, responsiveConfig.deviceType]);
+
+  // TV 返回键在主页面直接退出应用，尽量避免后台残留导致播放器异常
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      const isRootRoute = pathname === "/" || pathname === "/index";
+      if (!isRootRoute) {
+        return false;
+      }
+
+      logger.info("[BACK] Root route back pressed, exiting app immediately");
+      BackHandler.exitApp();
+      return true;
+    });
+
+    return () => subscription.remove();
+  }, [pathname]);
 
   if (!loaded && !error) {
     return null;
