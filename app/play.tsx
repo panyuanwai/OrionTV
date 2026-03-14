@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
+import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { Video } from "expo-av";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
@@ -112,6 +113,7 @@ export default function PlayScreen() {
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
+  const [videoInstanceKey, setVideoInstanceKey] = useState(0);
 
   // 使用Video事件处理hook
   const { videoProps } = useVideoHandlers({
@@ -131,6 +133,14 @@ export default function PlayScreen() {
   // 优化的动态样式 - 使用useMemo避免重复计算
   const dynamicStyles = useMemo(() => createResponsiveStyles(deviceType), [deviceType]);
 
+  // Chromecast/Google TV: 每次进入播放页都强制重建播放器实例（冷启动）
+  useFocusEffect(
+    useCallback(() => {
+      setVideoInstanceKey((prev) => prev + 1);
+      return undefined;
+    }, [])
+  );
+
   useEffect(() => {
     const perfStart = performance.now();
     logger.info(`[PERF] PlayScreen useEffect START - source: ${source}, id: ${id}, title: ${title}`);
@@ -147,7 +157,10 @@ export default function PlayScreen() {
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
+      logger.info(`[PERF] PlayScreen unmounting - unload player and reset state`);
+      videoRef.current?.unloadAsync?.().catch((error) => {
+        logger.warn(`[CLEANUP] Failed to unload video on unmount`, error);
+      });
       reset(); // Reset state when component unmounts
     };
   }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
@@ -223,7 +236,7 @@ export default function PlayScreen() {
       >
         {/* 条件渲染Video组件：只有在有有效URL时才渲染 */}
         {currentEpisode?.url ? (
-          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
+          <Video key={`${currentEpisode.url}-${videoInstanceKey}`} ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}
