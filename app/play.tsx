@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { Video } from "expo-av";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
@@ -131,6 +132,74 @@ export default function PlayScreen() {
   // 优化的动态样式 - 使用useMemo避免重复计算
   const dynamicStyles = useMemo(() => createResponsiveStyles(deviceType), [deviceType]);
 
+  const isRecoveringRef = useRef(false);
+  const lastRecoverAtRef = useRef(0);
+
+  const recoverPlayback = useCallback(
+    async (reason: "app-active" | "screen-focus") => {
+      if (deviceType !== "tv" || !currentEpisode?.url) {
+        return;
+      }
+
+      const now = Date.now();
+      if (isRecoveringRef.current || now - lastRecoverAtRef.current < 1200) {
+        return;
+      }
+
+      isRecoveringRef.current = true;
+      lastRecoverAtRef.current = now;
+
+      try {
+        const player = videoRef.current;
+        if (!player) return;
+
+        const status = await player.getStatusAsync();
+        if (status.isLoaded) {
+          const currentPosition = Math.max(0, status.positionMillis || 0);
+          await player.playAsync();
+          // Android TV 某些机型需要“微跳帧”才能真正唤醒渲染管线
+          await player.setPositionAsync(currentPosition + 1);
+          await player.setPositionAsync(currentPosition);
+
+          const verify = await player.getStatusAsync();
+          if (!verify.isLoaded || !verify.isPlaying) {
+            throw new Error("resume verification failed");
+          }
+
+          logger.info(`[RECOVER] Playback resumed by ${reason} at ${currentPosition}ms`);
+          return;
+        }
+
+        throw new Error("player status not loaded");
+      } catch (error) {
+        logger.warn(`[RECOVER] Resume failed on ${reason}, fallback to reload current source`, error);
+
+        try {
+          const player = videoRef.current;
+          if (!player || !currentEpisode?.url) return;
+
+          await player.unloadAsync();
+          await player.loadAsync(
+            { uri: currentEpisode.url },
+            {
+              shouldPlay: true,
+              positionMillis: Math.max(0, initialPosition || 0),
+              rate: playbackRate,
+              shouldCorrectPitch: true,
+            }
+          );
+
+          logger.info(`[RECOVER] Reloaded current source by ${reason}`);
+        } catch (reloadError) {
+          logger.error(`[RECOVER] Reload fallback failed on ${reason}`, reloadError);
+        }
+      } finally {
+        isRecoveringRef.current = false;
+      }
+    },
+    [deviceType, currentEpisode?.url, initialPosition, playbackRate]
+  );
+
   useEffect(() => {
     const perfStart = performance.now();
     logger.info(`[PERF] PlayScreen useEffect START - source: ${source}, id: ${id}, title: ${title}`);
@@ -147,7 +216,10 @@ export default function PlayScreen() {
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
+      logger.info(`[PERF] PlayScreen unmounting - unloading player and calling reset()`);
+      videoRef.current?.unloadAsync?.().catch((error) => {
+        logger.warn(`[CLEANUP] Failed to unload video on unmount`, error);
+      });
       reset(); // Reset state when component unmounts
     };
   }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
@@ -162,9 +234,18 @@ export default function PlayScreen() {
   }, [deviceType, tvRemoteHandler, setShowControls, showControls]);
 
   useEffect(() => {
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      if (nextAppState === "background" || nextAppState === "inactive") {
-        videoRef.current?.pauseAsync();
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      try {
+        if (nextAppState === "background" || nextAppState === "inactive") {
+          await videoRef.current?.pauseAsync();
+          return;
+        }
+
+        if (nextAppState === "active") {
+          await recoverPlayback("app-active");
+        }
+      } catch (error) {
+        logger.warn(`[APPSTATE] Failed to handle app state change: ${nextAppState}`, error);
       }
     };
 
@@ -173,7 +254,14 @@ export default function PlayScreen() {
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [recoverPlayback]);
+
+  useFocusEffect(
+    useCallback(() => {
+      recoverPlayback("screen-focus");
+      return undefined;
+    }, [recoverPlayback])
+  );
 
   useEffect(() => {
     const backAction = () => {
