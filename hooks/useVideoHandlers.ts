@@ -27,29 +27,72 @@ export const useVideoHandlers = ({
   
   const onLoad = useCallback(async () => {
     console.info(`[PERF] Video onLoad - video ready to play`);
-    
+
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
     try {
-      // 1. 先设置位置（如果需要）
-      const jumpPosition = initialPosition || introEndTime || 0;
+      const player = videoRef.current;
+      if (!player) {
+        usePlayerStore.setState({ isLoading: false });
+        return;
+      }
+
+      // 1) 先设置位置（历史续播/跳片头）
+      const rawJumpPosition = initialPosition || introEndTime || 0;
+      const jumpPosition = Math.max(0, rawJumpPosition);
       if (jumpPosition > 0) {
         console.info(`[PERF] Setting initial position to ${jumpPosition}ms`);
-        await videoRef.current?.setPositionAsync(jumpPosition);
+        await player.setPositionAsync(jumpPosition);
       }
-      
-      // 2. 显式调用播放以确保自动播放
+
+      // 2) 显式播放
       console.info(`[AUTOPLAY] Attempting to start playback after onLoad`);
-      await videoRef.current?.playAsync();
+      await player.playAsync();
+
+      // 3) TV 续播点首帧卡死兜底：检测 position 是否推进
+      const before = await player.getStatusAsync();
+      const beforePos = before.isLoaded ? before.positionMillis : 0;
+      await sleep(800);
+      const after = await player.getStatusAsync();
+      const afterPos = after.isLoaded ? after.positionMillis : 0;
+
+      const notProgressing = before.isLoaded && after.isLoaded && afterPos <= beforePos;
+      if (notProgressing) {
+        console.warn(`[AUTOPLAY] Position stuck at ${afterPos}ms, applying frame-wakeup fallback`);
+
+        // 3.1 微跳帧唤醒
+        await player.setPositionAsync(afterPos + 1);
+        await player.setPositionAsync(afterPos);
+        await player.playAsync();
+
+        await sleep(500);
+        const verify = await player.getStatusAsync();
+        const verifyPos = verify.isLoaded ? verify.positionMillis : afterPos;
+
+        // 3.2 仍不推进则强制重载当前 source + 续播点
+        if (verify.isLoaded && verifyPos <= afterPos && currentEpisode?.url) {
+          console.warn(`[AUTOPLAY] Still stuck after frame-wakeup, reloading source at ${jumpPosition}ms`);
+          await player.unloadAsync();
+          await player.loadAsync(
+            { uri: currentEpisode.url },
+            {
+              shouldPlay: true,
+              positionMillis: jumpPosition,
+              rate: playbackRate,
+              shouldCorrectPitch: true,
+            }
+          );
+        }
+      }
+
       console.info(`[AUTOPLAY] Auto-play successful after onLoad`);
-      
       usePlayerStore.setState({ isLoading: false });
       console.info(`[PERF] Video loading complete - isLoading set to false`);
     } catch (error) {
       console.warn(`[AUTOPLAY] Failed to auto-play after onLoad:`, error);
-      // 即使自动播放失败，也要设置加载完成状态
       usePlayerStore.setState({ isLoading: false });
-      // 不显示错误提示，因为自动播放失败是常见且预期的情况
     }
-  }, [videoRef, initialPosition, introEndTime]);
+  }, [videoRef, initialPosition, introEndTime, currentEpisode?.url, playbackRate]);
 
   const onLoadStart = useCallback(() => {
     if (!currentEpisode?.url) return;
