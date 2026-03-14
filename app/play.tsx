@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
+import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
@@ -114,6 +114,9 @@ export default function PlayScreen() {
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
 
+  const [videoInstanceKey, setVideoInstanceKey] = useState(0);
+  const [disableInitialSeek, setDisableInitialSeek] = useState(false);
+
   // 使用Video事件处理hook
   const { videoProps } = useVideoHandlers({
     videoRef,
@@ -124,6 +127,7 @@ export default function PlayScreen() {
     handlePlaybackStatusUpdate,
     deviceType,
     detail: detail || undefined,
+    disableInitialSeek,
   });
 
   // TV遥控器处理 - 总是调用hook，但根据设备类型决定是否使用结果
@@ -134,6 +138,32 @@ export default function PlayScreen() {
 
   const isRecoveringRef = useRef(false);
   const lastRecoverAtRef = useRef(0);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+
+  const forceRecreatePlayer = useCallback(async (reason: "app-active" | "screen-focus") => {
+    if (deviceType !== "tv") return;
+
+    logger.warn(`[RECOVER] Force recreating video instance due to ${reason}`);
+    setDisableInitialSeek(true);
+
+    try {
+      await videoRef.current?.stopAsync?.();
+    } catch (error) {
+      logger.warn(`[RECOVER] stopAsync failed before recreate on ${reason}`, error);
+    }
+
+    try {
+      await videoRef.current?.unloadAsync?.();
+    } catch (error) {
+      logger.warn(`[RECOVER] unloadAsync failed before recreate on ${reason}`, error);
+    }
+
+    setVideoInstanceKey((prev) => prev + 1);
+
+    setTimeout(() => {
+      setDisableInitialSeek(false);
+    }, 2500);
+  }, [deviceType]);
 
   const recoverPlayback = useCallback(
     async (reason: "app-active" | "screen-focus") => {
@@ -150,6 +180,11 @@ export default function PlayScreen() {
       lastRecoverAtRef.current = now;
 
       try {
+        if (reason === "app-active") {
+          await forceRecreatePlayer(reason);
+          return;
+        }
+
         const player = videoRef.current;
         if (!player) return;
 
@@ -197,7 +232,7 @@ export default function PlayScreen() {
         isRecoveringRef.current = false;
       }
     },
-    [deviceType, currentEpisode?.url, initialPosition, playbackRate]
+    [deviceType, currentEpisode?.url, initialPosition, playbackRate, forceRecreatePlayer]
   );
 
   useEffect(() => {
@@ -235,13 +270,19 @@ export default function PlayScreen() {
 
   useEffect(() => {
     const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      const prevState = appStateRef.current;
+      appStateRef.current = nextAppState;
+
       try {
         if (nextAppState === "background" || nextAppState === "inactive") {
           await videoRef.current?.pauseAsync();
           return;
         }
 
-        if (nextAppState === "active") {
+        const resumedFromBackground =
+          nextAppState === "active" && (prevState === "background" || prevState === "inactive");
+
+        if (resumedFromBackground) {
           await recoverPlayback("app-active");
         }
       } catch (error) {
@@ -311,7 +352,7 @@ export default function PlayScreen() {
       >
         {/* 条件渲染Video组件：只有在有有效URL时才渲染 */}
         {currentEpisode?.url ? (
-          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
+          <Video key={`${currentEpisode.url}-${videoInstanceKey}`} ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}

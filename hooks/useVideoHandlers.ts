@@ -12,6 +12,7 @@ interface UseVideoHandlersProps {
   handlePlaybackStatusUpdate: (status: any) => void;
   deviceType: string;
   detail?: { poster?: string };
+  disableInitialSeek?: boolean;
 }
 
 export const useVideoHandlers = ({
@@ -23,6 +24,7 @@ export const useVideoHandlers = ({
   handlePlaybackStatusUpdate,
   deviceType,
   detail,
+  disableInitialSeek = false,
 }: UseVideoHandlersProps) => {
   
   const onLoad = useCallback(async () => {
@@ -38,7 +40,7 @@ export const useVideoHandlers = ({
       }
 
       // 1) 先设置位置（历史续播/跳片头）
-      const rawJumpPosition = initialPosition || introEndTime || 0;
+      const rawJumpPosition = disableInitialSeek ? 0 : (initialPosition || introEndTime || 0);
       const jumpPosition = Math.max(0, rawJumpPosition);
       if (jumpPosition > 0) {
         console.info(`[PERF] Setting initial position to ${jumpPosition}ms`);
@@ -92,7 +94,7 @@ export const useVideoHandlers = ({
       console.warn(`[AUTOPLAY] Failed to auto-play after onLoad:`, error);
       usePlayerStore.setState({ isLoading: false });
     }
-  }, [videoRef, initialPosition, introEndTime, currentEpisode?.url, playbackRate]);
+  }, [videoRef, initialPosition, introEndTime, currentEpisode?.url, playbackRate, disableInitialSeek]);
 
   const onLoadStart = useCallback(() => {
     if (!currentEpisode?.url) return;
