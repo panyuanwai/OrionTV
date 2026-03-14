@@ -18,6 +18,7 @@ import Toast from "react-native-toast-message";
 import usePlayerStore, { selectCurrentEpisode } from "@/stores/playerStore";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
 import { useVideoHandlers } from "@/hooks/useVideoHandlers";
+import { useAppStateStore } from "@/stores/appStateStore";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayScreen');
@@ -113,6 +114,7 @@ export default function PlayScreen() {
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
+  const consumeResumedFromBackground = useAppStateStore((state) => state.consumeResumedFromBackground);
 
   const [videoInstanceKey, setVideoInstanceKey] = useState(0);
   const [disableInitialSeek, setDisableInitialSeek] = useState(false);
@@ -299,9 +301,15 @@ export default function PlayScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      recoverPlayback("screen-focus");
+      const resumedFromBackground = consumeResumedFromBackground();
+      if (resumedFromBackground) {
+        logger.info("[APPSTATE] Global resume flag consumed in PlayScreen focus, forcing recreate");
+        forceRecreatePlayer("screen-focus");
+      } else {
+        recoverPlayback("screen-focus");
+      }
       return undefined;
-    }, [recoverPlayback])
+    }, [recoverPlayback, forceRecreatePlayer, consumeResumedFromBackground])
   );
 
   useEffect(() => {

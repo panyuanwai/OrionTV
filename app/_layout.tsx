@@ -2,8 +2,8 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import { useEffect } from "react";
-import { Platform, View, StyleSheet } from "react-native";
+import { useEffect, useRef } from "react";
+import { Platform, View, StyleSheet, AppState, AppStateStatus } from "react-native";
 import Toast from "react-native-toast-message";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
@@ -12,6 +12,7 @@ import { useRemoteControlStore } from "@/stores/remoteControlStore";
 import LoginModal from "@/components/LoginModal";
 import useAuthStore from "@/stores/authStore";
 import { useUpdateStore, initUpdateStore } from "@/stores/updateStore";
+import { useAppStateStore } from "@/stores/appStateStore";
 import { UpdateModal } from "@/components/UpdateModal";
 import { UPDATE_CONFIG } from "@/constants/UpdateConfig";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
@@ -31,7 +32,9 @@ export default function RootLayout() {
   const { startServer, stopServer } = useRemoteControlStore();
   const { checkLoginStatus } = useAuthStore();
   const { checkForUpdate, lastCheckTime } = useUpdateStore();
+  const { markResumedFromBackground } = useAppStateStore();
   const responsiveConfig = useResponsiveLayout();
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
     const initializeApp = async () => {
@@ -66,6 +69,24 @@ export default function RootLayout() {
       }
     }
   }, [loaded, lastCheckTime, checkForUpdate]);
+
+  // 全局 AppState 监听：用于标记“刚从后台恢复”
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const prevState = appStateRef.current;
+      appStateRef.current = nextState;
+
+      const resumedFromBackground =
+        nextState === "active" && (prevState === "background" || prevState === "inactive");
+
+      if (resumedFromBackground) {
+        logger.info("[APPSTATE] App resumed from background, mark global resume flag");
+        markResumedFromBackground();
+      }
+    });
+
+    return () => subscription.remove();
+  }, [markResumedFromBackground]);
 
   useEffect(() => {
     // 只有在非手机端才启动远程控制服务器
