@@ -1,7 +1,7 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { useFonts } from "expo-font";
 import { Audio } from "expo-av";
-import { Stack, usePathname } from "expo-router";
+import { Stack, usePathname, useRootNavigationState } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef } from "react";
 import { Platform, View, StyleSheet, AppState, AppStateStatus, BackHandler } from "react-native";
@@ -36,6 +36,7 @@ export default function RootLayout() {
   const { markResumedFromBackground } = useAppStateStore();
   const responsiveConfig = useResponsiveLayout();
   const pathname = usePathname();
+  const rootNavState = useRootNavigationState();
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
 
   useEffect(() => {
@@ -115,18 +116,23 @@ export default function RootLayout() {
     if (Platform.OS !== "android") return;
 
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
-      const isRootRoute = pathname === "/" || pathname === "/index";
-      if (!isRootRoute) {
+      const isRootRouteByPath = pathname === "/" || pathname === "/index";
+      const isRootRouteByNav = (rootNavState?.index ?? 1) === 0;
+      const shouldExitNow = isRootRouteByPath || isRootRouteByNav;
+
+      if (!shouldExitNow) {
         return false;
       }
 
-      logger.info("[BACK] Root route back pressed, exiting app immediately");
+      logger.info(`[BACK] Root back pressed (path=${pathname}, navIndex=${rootNavState?.index}), exiting app immediately`);
       BackHandler.exitApp();
+      // 某些 TV ROM 首次调用可能只退到后台，补一次兜底
+      setTimeout(() => BackHandler.exitApp(), 250);
       return true;
     });
 
     return () => subscription.remove();
-  }, [pathname]);
+  }, [pathname, rootNavState?.index]);
 
   if (!loaded && !error) {
     return null;
