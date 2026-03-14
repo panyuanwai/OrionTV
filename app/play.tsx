@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
+import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { Video } from "expo-av";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
@@ -112,6 +113,25 @@ export default function PlayScreen() {
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
+  const [videoInstanceKey, setVideoInstanceKey] = useState(0);
+
+  const hardResetPlayerOnLeave = useCallback(async () => {
+    try {
+      await videoRef.current?.stopAsync?.();
+    } catch (error) {
+      logger.warn(`[RESET] stopAsync failed`, error);
+    }
+
+    try {
+      await videoRef.current?.unloadAsync?.();
+    } catch (error) {
+      logger.warn(`[RESET] unloadAsync failed`, error);
+    }
+
+    // 强制重建下一次进入播放页时的 Video 实例
+    setVideoInstanceKey((prev) => prev + 1);
+    reset();
+  }, [reset]);
 
   // 使用Video事件处理hook
   const { videoProps } = useVideoHandlers({
@@ -147,10 +167,10 @@ export default function PlayScreen() {
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
-      reset(); // Reset state when component unmounts
+      logger.info(`[PERF] PlayScreen unmounting - hard reset player state`);
+      hardResetPlayerOnLeave();
     };
-  }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
+  }, [episodeIndex, source, position, setVideoRef, loadVideo, id, title, hardResetPlayerOnLeave]);
 
   // 优化的屏幕点击处理
   const onScreenPress = useCallback(() => {
@@ -175,12 +195,21 @@ export default function PlayScreen() {
     };
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        hardResetPlayerOnLeave();
+      };
+    }, [hardResetPlayerOnLeave])
+  );
+
   useEffect(() => {
     const backAction = () => {
       if (showControls) {
         setShowControls(false);
         return true;
       }
+      hardResetPlayerOnLeave();
       router.back();
       return true;
     };
@@ -188,7 +217,7 @@ export default function PlayScreen() {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", backAction);
 
     return () => backHandler.remove();
-  }, [showControls, setShowControls, router]);
+  }, [showControls, setShowControls, router, hardResetPlayerOnLeave]);
 
   useEffect(() => {
     let timeoutId: NodeJS.Timeout | null = null;
@@ -223,7 +252,7 @@ export default function PlayScreen() {
       >
         {/* 条件渲染Video组件：只有在有有效URL时才渲染 */}
         {currentEpisode?.url ? (
-          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
+          <Video key={`${currentEpisode.url}-${videoInstanceKey}`} ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}

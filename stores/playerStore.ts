@@ -453,8 +453,9 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
 
   reset: () => {
     set({
+      videoRef: null,
       episodes: [],
-      currentEpisodeIndex: 0,
+      currentEpisodeIndex: -1,
       status: null,
       isLoading: true,
       showControls: false,
@@ -463,6 +464,9 @@ const usePlayerStore = create<PlayerState>((set, get) => ({
       showSpeedModal: false,
       showNextEpisodeOverlay: false,
       initialPosition: 0,
+      progressPosition: 0,
+      seekPosition: 0,
+      isSeeking: false,
       playbackRate: 1.0,
       introEndTime: undefined,
       outroStartTime: undefined,
