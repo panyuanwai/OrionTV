@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
-import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
+import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
+import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View, Platform } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { Video } from "expo-av";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
 import { PlayerControls } from "@/components/PlayerControls";
@@ -16,7 +16,6 @@ import { useTVRemoteHandler } from "@/hooks/useTVRemoteHandler";
 import Toast from "react-native-toast-message";
 import usePlayerStore, { selectCurrentEpisode } from "@/stores/playerStore";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
-import { useVideoHandlers } from "@/hooks/useVideoHandlers";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayScreen');
@@ -70,7 +69,6 @@ const createResponsiveStyles = (deviceType: string) => {
 };
 
 export default function PlayScreen() {
-  const videoRef = useRef<Video>(null);
   const router = useRouter();
   useKeepAwake();
 
@@ -104,7 +102,6 @@ export default function PlayScreen() {
     initialPosition,
     introEndTime,
     playbackRate,
-    setVideoRef,
     handlePlaybackStatusUpdate,
     setShowControls,
     // setShowNextEpisodeOverlay,
@@ -113,17 +110,97 @@ export default function PlayScreen() {
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
 
-  // 使用Video事件处理hook
-  const { videoProps } = useVideoHandlers({
-    videoRef,
-    currentEpisode,
-    initialPosition,
-    introEndTime,
-    playbackRate,
-    handlePlaybackStatusUpdate,
-    deviceType,
-    detail: detail || undefined,
+  // expo-video: 使用 useVideoPlayer hook 创建播放器实例
+  // useVideoPlayer 会在组件卸载时自动清理底层 ExoPlayer 资源
+  // 这是解决 Chromecast 卡帧问题的关键 — expo-av 的 Video 组件不会自动释放
+  const videoUrl = currentEpisode?.url || '';
+  const player = useVideoPlayer(videoUrl, (player) => {
+    logger.info(`[EXPO-VIDEO] Player created/source changed for: ${videoUrl.substring(0, 80)}...`);
+    player.playbackRate = playbackRate;
+
+    // 设置初始播放位置
+    const jumpPosition = initialPosition || introEndTime || 0;
+    if (jumpPosition > 0) {
+      logger.info(`[EXPO-VIDEO] Setting initial position to ${jumpPosition}ms (${jumpPosition / 1000}s)`);
+      player.currentTime = jumpPosition / 1000; // expo-video 使用秒为单位
+    }
+
+    // 自动开始播放
+    player.play();
   });
+
+  // 将 player 实例保存到 store 中供其他组件使用
+  useEffect(() => {
+    usePlayerStore.setState({ videoPlayer: player });
+    return () => {
+      usePlayerStore.setState({ videoPlayer: null });
+    };
+  }, [player]);
+
+  // 监听播放器状态变化
+  useEffect(() => {
+    if (!player) return;
+
+    const statusSub = player.addListener('statusChange', (newStatus: any) => {
+      logger.info(`[EXPO-VIDEO] Status changed: ${JSON.stringify(newStatus)}`);
+      if (newStatus.status === 'readyToPlay') {
+        usePlayerStore.setState({ isLoading: false });
+      } else if (newStatus.status === 'error') {
+        logger.error(`[EXPO-VIDEO] Player error: ${JSON.stringify(newStatus.error)}`);
+        usePlayerStore.setState({ isLoading: false });
+        if (currentEpisode?.url) {
+          usePlayerStore.getState().handleVideoError('other', currentEpisode.url);
+        }
+      }
+    });
+
+    // 定期更新播放进度（用于进度条和播放记录保存）
+    const timeUpdateInterval = setInterval(() => {
+      if (player && player.playing) {
+        const positionMillis = (player.currentTime || 0) * 1000;
+        const durationMillis = (player.duration || 0) * 1000;
+        const isPlaying = player.playing;
+
+        if (durationMillis > 0) {
+          const progressPosition = positionMillis / durationMillis;
+          const avCompatStatus = {
+            isLoaded: true,
+            isPlaying,
+            positionMillis,
+            durationMillis,
+            didJustFinish: false,
+          };
+          handlePlaybackStatusUpdate(avCompatStatus);
+        }
+      }
+    }, 1000);
+
+    return () => {
+      statusSub.remove();
+      clearInterval(timeUpdateInterval);
+    };
+  }, [player, currentEpisode?.url, handlePlaybackStatusUpdate]);
+
+  // 监听播放完成事件
+  useEffect(() => {
+    if (!player) return;
+
+    const endSub = player.addListener('playToEnd', () => {
+      logger.info(`[EXPO-VIDEO] Playback reached end`);
+      const avCompatStatus = {
+        isLoaded: true,
+        isPlaying: false,
+        positionMillis: (player.duration || 0) * 1000,
+        durationMillis: (player.duration || 0) * 1000,
+        didJustFinish: true,
+      };
+      handlePlaybackStatusUpdate(avCompatStatus);
+    });
+
+    return () => {
+      endSub.remove();
+    };
+  }, [player, handlePlaybackStatusUpdate]);
 
   // TV遥控器处理 - 总是调用hook，但根据设备类型决定是否使用结果
   const tvRemoteHandler = useTVRemoteHandler();
@@ -135,7 +212,6 @@ export default function PlayScreen() {
     const perfStart = performance.now();
     logger.info(`[PERF] PlayScreen useEffect START - source: ${source}, id: ${id}, title: ${title}`);
 
-    setVideoRef(videoRef);
     if (source && id && title) {
       logger.info(`[PERF] Calling loadVideo with episodeIndex: ${episodeIndex}, position: ${position}`);
       loadVideo({ source, id, episodeIndex, position, title });
@@ -147,10 +223,12 @@ export default function PlayScreen() {
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
-      reset(); // Reset state when component unmounts
+      logger.info(`[PERF] PlayScreen unmounting - expo-video player will auto-cleanup`);
+      // expo-video 的 useVideoPlayer 会自动释放底层 ExoPlayer 资源
+      // 这里只需要重置 store 状态
+      reset();
     };
-  }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
+  }, [episodeIndex, source, position, reset, loadVideo, id, title]);
 
   // 优化的屏幕点击处理
   const onScreenPress = useCallback(() => {
@@ -161,10 +239,27 @@ export default function PlayScreen() {
     }
   }, [deviceType, tvRemoteHandler, setShowControls, showControls]);
 
+  // AppState 生命周期管理
   useEffect(() => {
+    const appStateRef = { current: AppState.currentState };
+
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      if (nextAppState === "background" || nextAppState === "inactive") {
-        videoRef.current?.pauseAsync();
+      try {
+        if (nextAppState === "background" || nextAppState === "inactive") {
+          logger.info(`[APPSTATE] App going to background, pausing player`);
+          player?.pause();
+        } else if (
+          nextAppState === "active" &&
+          (appStateRef.current === "background" || appStateRef.current === "inactive")
+        ) {
+          logger.info(`[APPSTATE] App returning to foreground, resuming player`);
+          // expo-video 的 player 在恢复时应该能正常工作
+          // 因为 useVideoPlayer 管理了底层 ExoPlayer 的完整生命周期
+          player?.play();
+        }
+        appStateRef.current = nextAppState;
+      } catch (error) {
+        logger.warn(`[APPSTATE] Failed to handle app state change: ${nextAppState}`, error);
       }
     };
 
@@ -173,7 +268,7 @@ export default function PlayScreen() {
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [player]);
 
   useEffect(() => {
     const backAction = () => {
@@ -221,9 +316,14 @@ export default function PlayScreen() {
         onPress={onScreenPress}
         disabled={deviceType !== "tv" && showControls} // 移动端和平板端在显示控制条时禁用触摸
       >
-        {/* 条件渲染Video组件：只有在有有效URL时才渲染 */}
+        {/* 条件渲染VideoView组件：只有在有有效URL时才渲染 */}
         {currentEpisode?.url ? (
-          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
+          <VideoView
+            style={dynamicStyles.videoPlayer}
+            player={player}
+            contentFit="contain"
+            nativeControls={deviceType !== 'tv'}
+          />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}
