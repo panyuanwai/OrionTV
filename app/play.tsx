@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
-import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View, Platform } from "react-native";
+import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useVideoPlayer, VideoView } from "expo-video";
+import { Video } from "expo-av";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
 import { PlayerControls } from "@/components/PlayerControls";
@@ -16,16 +16,51 @@ import { useTVRemoteHandler } from "@/hooks/useTVRemoteHandler";
 import Toast from "react-native-toast-message";
 import usePlayerStore, { selectCurrentEpisode } from "@/stores/playerStore";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
+import { useVideoHandlers } from "@/hooks/useVideoHandlers";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayScreen');
+
+// 全局变量：追踪上一个 ExoPlayer 的释放 Promise
+// 用于确保新的 Video 组件只有在上一个完全释放后才挂载
+let _lastUnloadPromise: Promise<void> | null = null;
+
+/**
+ * 安全地释放 Video 组件的 ExoPlayer 资源
+ * 返回一个 Promise，当资源完全释放后 resolve
+ */
+async function safeUnloadVideo(videoRef: React.RefObject<Video>): Promise<void> {
+  if (!videoRef.current) return;
+
+  const startTime = Date.now();
+  logger.info(`[CLEANUP] Starting safe unload...`);
+
+  try {
+    // 先暂停，确保 ExoPlayer 停止渲染
+    await videoRef.current.pauseAsync().catch(() => { });
+
+    // 然后停止播放
+    await videoRef.current.stopAsync().catch(() => { });
+
+    // 最后卸载，释放 MediaCodec 和 Surface
+    await videoRef.current.unloadAsync().catch(() => { });
+
+    logger.info(`[CLEANUP] Safe unload completed in ${Date.now() - startTime}ms`);
+  } catch (error) {
+    logger.warn(`[CLEANUP] Error during safe unload (${Date.now() - startTime}ms):`, error);
+  }
+
+  // 额外等待 300ms，让 Android 系统有时间完全回收硬件解码器
+  // 这在 Chromecast 等低资源设备上至关重要
+  await new Promise(resolve => setTimeout(resolve, 300));
+  logger.info(`[CLEANUP] Hardware decoder release wait completed`);
+}
 
 // 优化的加载动画组件
 const LoadingContainer = memo(
   ({ style, currentEpisode }: { style: any; currentEpisode: { url: string; title: string } | undefined }) => {
     logger.info(
-      `[PERF] Video component NOT rendered - waiting for valid URL. currentEpisode: ${!!currentEpisode}, url: ${
-        currentEpisode?.url ? "exists" : "missing"
+      `[PERF] Video component NOT rendered - waiting for valid URL. currentEpisode: ${!!currentEpisode}, url: ${currentEpisode?.url ? "exists" : "missing"
       }`
     );
     return (
@@ -47,12 +82,10 @@ const createResponsiveStyles = (deviceType: string) => {
     container: {
       flex: 1,
       backgroundColor: "black",
-      // 移动端和平板端可能需要状态栏处理
       ...(isMobile || isTablet ? { paddingTop: 0 } : {}),
     },
     videoContainer: {
       ...StyleSheet.absoluteFillObject,
-      // 为触摸设备添加更多的交互区域
       ...(isMobile || isTablet ? { zIndex: 1 } : {}),
     },
     videoPlayer: {
@@ -69,8 +102,18 @@ const createResponsiveStyles = (deviceType: string) => {
 };
 
 export default function PlayScreen() {
+  const videoRef = useRef<Video>(null);
   const router = useRouter();
   useKeepAwake();
+
+  // 关键修复 #1: 延迟挂载 Video 组件
+  // 在 Chromecast 上，旧的 ExoPlayer 可能还没释放完硬件解码器
+  // 需要等待上一次的 unloadAsync 完成后再挂载新的 Video
+  const [videoReady, setVideoReady] = useState(false);
+
+  // 用于追踪 app 是否从后台恢复
+  const appStateRef = useRef(AppState.currentState);
+  const isCleaningUpRef = useRef(false);
 
   // 响应式布局配置
   const { deviceType } = useResponsiveLayout();
@@ -98,120 +141,71 @@ export default function PlayScreen() {
   const {
     isLoading,
     showControls,
-    // showNextEpisodeOverlay,
     initialPosition,
     introEndTime,
     playbackRate,
+    setVideoRef,
     handlePlaybackStatusUpdate,
     setShowControls,
-    // setShowNextEpisodeOverlay,
     reset,
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
 
-  // expo-video: 使用 useVideoPlayer hook 创建播放器实例
-  // useVideoPlayer 会在组件卸载时自动清理底层 ExoPlayer 资源
-  // 这是解决 Chromecast 卡帧问题的关键 — expo-av 的 Video 组件不会自动释放
-  const videoUrl = currentEpisode?.url || '';
-  const player = useVideoPlayer(videoUrl, (player) => {
-    logger.info(`[EXPO-VIDEO] Player created/source changed for: ${videoUrl.substring(0, 80)}...`);
-    player.playbackRate = playbackRate;
-
-    // 设置初始播放位置
-    const jumpPosition = initialPosition || introEndTime || 0;
-    if (jumpPosition > 0) {
-      logger.info(`[EXPO-VIDEO] Setting initial position to ${jumpPosition}ms (${jumpPosition / 1000}s)`);
-      player.currentTime = jumpPosition / 1000; // expo-video 使用秒为单位
-    }
-
-    // 自动开始播放
-    player.play();
+  // 使用Video事件处理hook
+  const { videoProps } = useVideoHandlers({
+    videoRef,
+    currentEpisode,
+    initialPosition,
+    introEndTime,
+    playbackRate,
+    handlePlaybackStatusUpdate,
+    deviceType,
+    detail: detail || undefined,
   });
 
-  // 将 player 实例保存到 store 中供其他组件使用
-  useEffect(() => {
-    usePlayerStore.setState({ videoPlayer: player });
-    return () => {
-      usePlayerStore.setState({ videoPlayer: null });
-    };
-  }, [player]);
-
-  // 监听播放器状态变化
-  useEffect(() => {
-    if (!player) return;
-
-    const statusSub = player.addListener('statusChange', (newStatus: any) => {
-      logger.info(`[EXPO-VIDEO] Status changed: ${JSON.stringify(newStatus)}`);
-      if (newStatus.status === 'readyToPlay') {
-        usePlayerStore.setState({ isLoading: false });
-      } else if (newStatus.status === 'error') {
-        logger.error(`[EXPO-VIDEO] Player error: ${JSON.stringify(newStatus.error)}`);
-        usePlayerStore.setState({ isLoading: false });
-        if (currentEpisode?.url) {
-          usePlayerStore.getState().handleVideoError('other', currentEpisode.url);
-        }
-      }
-    });
-
-    // 定期更新播放进度（用于进度条和播放记录保存）
-    const timeUpdateInterval = setInterval(() => {
-      if (player && player.playing) {
-        const positionMillis = (player.currentTime || 0) * 1000;
-        const durationMillis = (player.duration || 0) * 1000;
-        const isPlaying = player.playing;
-
-        if (durationMillis > 0) {
-          const progressPosition = positionMillis / durationMillis;
-          const avCompatStatus = {
-            isLoaded: true,
-            isPlaying,
-            positionMillis,
-            durationMillis,
-            didJustFinish: false,
-          };
-          handlePlaybackStatusUpdate(avCompatStatus);
-        }
-      }
-    }, 1000);
-
-    return () => {
-      statusSub.remove();
-      clearInterval(timeUpdateInterval);
-    };
-  }, [player, currentEpisode?.url, handlePlaybackStatusUpdate]);
-
-  // 监听播放完成事件
-  useEffect(() => {
-    if (!player) return;
-
-    const endSub = player.addListener('playToEnd', () => {
-      logger.info(`[EXPO-VIDEO] Playback reached end`);
-      const avCompatStatus = {
-        isLoaded: true,
-        isPlaying: false,
-        positionMillis: (player.duration || 0) * 1000,
-        durationMillis: (player.duration || 0) * 1000,
-        didJustFinish: true,
-      };
-      handlePlaybackStatusUpdate(avCompatStatus);
-    });
-
-    return () => {
-      endSub.remove();
-    };
-  }, [player, handlePlaybackStatusUpdate]);
-
-  // TV遥控器处理 - 总是调用hook，但根据设备类型决定是否使用结果
+  // TV遥控器处理
   const tvRemoteHandler = useTVRemoteHandler();
 
-  // 优化的动态样式 - 使用useMemo避免重复计算
+  // 优化的动态样式
   const dynamicStyles = useMemo(() => createResponsiveStyles(deviceType), [deviceType]);
+
+  // 关键修复 #2: 延迟挂载 Video 组件直到确认旧 ExoPlayer 已释放
+  useEffect(() => {
+    let cancelled = false;
+
+    const waitAndMount = async () => {
+      logger.info(`[MOUNT] PlayScreen mounting - checking for pending unload...`);
+
+      // 等待上一个 Video 的 unloadAsync 完成
+      if (_lastUnloadPromise) {
+        logger.info(`[MOUNT] Waiting for previous ExoPlayer to release...`);
+        await _lastUnloadPromise;
+        _lastUnloadPromise = null;
+        logger.info(`[MOUNT] Previous ExoPlayer released successfully`);
+      }
+
+      // 额外安全延迟：给 Chromecast 的硬件解码器时间完全回收
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (!cancelled) {
+        logger.info(`[MOUNT] Video component ready to mount`);
+        setVideoReady(true);
+      }
+    };
+
+    waitAndMount();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const perfStart = performance.now();
     logger.info(`[PERF] PlayScreen useEffect START - source: ${source}, id: ${id}, title: ${title}`);
 
+    setVideoRef(videoRef);
     if (source && id && title) {
       logger.info(`[PERF] Calling loadVideo with episodeIndex: ${episodeIndex}, position: ${position}`);
       loadVideo({ source, id, episodeIndex, position, title });
@@ -222,13 +216,17 @@ export default function PlayScreen() {
     const perfEnd = performance.now();
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
+    // 关键修复 #3: cleanup 时保存 unload promise 到全局变量
     return () => {
-      logger.info(`[PERF] PlayScreen unmounting - expo-video player will auto-cleanup`);
-      // expo-video 的 useVideoPlayer 会自动释放底层 ExoPlayer 资源
-      // 这里只需要重置 store 状态
+      logger.info(`[PERF] PlayScreen unmounting - starting safe cleanup`);
+
+      // 将 unload 操作保存为全局 Promise
+      // 这样下一次 PlayScreen 挂载时可以等待它完成
+      _lastUnloadPromise = safeUnloadVideo(videoRef);
+
       reset();
     };
-  }, [episodeIndex, source, position, reset, loadVideo, id, title]);
+  }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
 
   // 优化的屏幕点击处理
   const onScreenPress = useCallback(() => {
@@ -239,27 +237,56 @@ export default function PlayScreen() {
     }
   }, [deviceType, tvRemoteHandler, setShowControls, showControls]);
 
-  // AppState 生命周期管理
+  // 关键修复 #4: AppState 监听器 - 后台化时暂停，恢复时重新播放
   useEffect(() => {
-    const appStateRef = { current: AppState.currentState };
-
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      try {
-        if (nextAppState === "background" || nextAppState === "inactive") {
-          logger.info(`[APPSTATE] App going to background, pausing player`);
-          player?.pause();
-        } else if (
-          nextAppState === "active" &&
-          (appStateRef.current === "background" || appStateRef.current === "inactive")
-        ) {
-          logger.info(`[APPSTATE] App returning to foreground, resuming player`);
-          // expo-video 的 player 在恢复时应该能正常工作
-          // 因为 useVideoPlayer 管理了底层 ExoPlayer 的完整生命周期
-          player?.play();
-        }
-        appStateRef.current = nextAppState;
-      } catch (error) {
-        logger.warn(`[APPSTATE] Failed to handle app state change: ${nextAppState}`, error);
+      const prevState = appStateRef.current;
+      appStateRef.current = nextAppState;
+
+      if (nextAppState === "background" || nextAppState === "inactive") {
+        // 进入后台：暂停视频
+        logger.info(`[APPSTATE] App going to background, pausing video`);
+        videoRef.current?.pauseAsync().catch(() => { });
+      } else if (
+        nextAppState === "active" &&
+        (prevState === "background" || prevState === "inactive")
+      ) {
+        // 从后台恢复：强制重新加载视频源
+        logger.info(`[APPSTATE] App returning to foreground, attempting recovery`);
+
+        // 延迟恢复：给 Android 系统时间重新初始化 SurfaceView
+        setTimeout(async () => {
+          if (!videoRef.current) return;
+
+          try {
+            // 先尝试直接播放
+            await videoRef.current.playAsync();
+            logger.info(`[APPSTATE] Direct playAsync succeeded after resume`);
+          } catch (error) {
+            logger.warn(`[APPSTATE] Direct playAsync failed, trying full reload...`);
+
+            try {
+              // 如果直接播放失败，完全重新加载
+              const episode = usePlayerStore.getState();
+              const currentEp = selectCurrentEpisode(episode);
+              if (currentEp?.url) {
+                const currentPosition = episode.status?.isLoaded
+                  ? episode.status.positionMillis
+                  : 0;
+
+                await videoRef.current.unloadAsync();
+                await new Promise(r => setTimeout(r, 300));
+                await videoRef.current.loadAsync(
+                  { uri: currentEp.url },
+                  { positionMillis: currentPosition, shouldPlay: true }
+                );
+                logger.info(`[APPSTATE] Full reload succeeded after resume`);
+              }
+            } catch (reloadError) {
+              logger.error(`[APPSTATE] Full reload failed:`, reloadError);
+            }
+          }
+        }, 500);
       }
     };
 
@@ -268,16 +295,37 @@ export default function PlayScreen() {
     return () => {
       subscription.remove();
     };
-  }, [player]);
+  }, []);
 
+  // 关键修复 #5: BackHandler 先 await 清理再导航
   useEffect(() => {
     const backAction = () => {
       if (showControls) {
         setShowControls(false);
         return true;
       }
-      router.back();
-      return true;
+
+      if (isCleaningUpRef.current) {
+        // 防止重复点击返回导致多次清理
+        return true;
+      }
+
+      // 返回 true 先阻止默认行为
+      // 然后异步完成清理后再导航
+      isCleaningUpRef.current = true;
+
+      (async () => {
+        logger.info(`[BACK] Back pressed - starting cleanup before navigation`);
+
+        // 先完成 ExoPlayer 清理
+        await safeUnloadVideo(videoRef);
+
+        logger.info(`[BACK] Cleanup complete - navigating back`);
+        router.back();
+        isCleaningUpRef.current = false;
+      })();
+
+      return true; // 阻止默认
     };
 
     const backHandler = BackHandler.addEventListener("hardwareBackPress", backAction);
@@ -294,7 +342,7 @@ export default function PlayScreen() {
           usePlayerStore.setState({ isLoading: false });
           Toast.show({ type: "error", text1: "播放超时，请重试" });
         }
-      }, 60000); // 1 minute
+      }, 60000);
     }
 
     return () => {
@@ -314,16 +362,11 @@ export default function PlayScreen() {
         activeOpacity={1}
         style={dynamicStyles.videoContainer}
         onPress={onScreenPress}
-        disabled={deviceType !== "tv" && showControls} // 移动端和平板端在显示控制条时禁用触摸
+        disabled={deviceType !== "tv" && showControls}
       >
-        {/* 条件渲染VideoView组件：只有在有有效URL时才渲染 */}
-        {currentEpisode?.url ? (
-          <VideoView
-            style={dynamicStyles.videoPlayer}
-            player={player}
-            contentFit="contain"
-            nativeControls={deviceType !== 'tv'}
-          />
+        {/* 关键修复: 只有在 videoReady 为 true（旧 ExoPlayer 已释放）时才渲染 Video */}
+        {videoReady && currentEpisode?.url ? (
+          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}
@@ -334,14 +377,11 @@ export default function PlayScreen() {
 
         <SeekingBar />
 
-        {/* 只在Video组件存在且正在加载时显示加载动画覆盖层 */}
         {currentEpisode?.url && isLoading && (
           <View style={dynamicStyles.loadingContainer}>
             <VideoLoadingAnimation showProgressBar />
           </View>
         )}
-
-        {/* <NextEpisodeOverlay visible={showNextEpisodeOverlay} onCancel={() => setShowNextEpisodeOverlay(false)} /> */}
       </TouchableOpacity>
 
       <EpisodeSelectionModal />
