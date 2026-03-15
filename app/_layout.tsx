@@ -3,7 +3,7 @@ import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { Platform, View, StyleSheet } from "react-native";
+import { Platform, View, StyleSheet, BackHandler } from "react-native";
 import Toast from "react-native-toast-message";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
@@ -75,6 +75,25 @@ export default function RootLayout() {
       stopServer();
     }
   }, [remoteInputEnabled, startServer, stopServer, responsiveConfig.deviceType]);
+
+  // 关键修复: 在 TV 设备的根路由上按返回键时，完全退出 app（杀掉进程）
+  // 这可以防止 ExoPlayer 的 MediaCodec 状态在进程复用时被损坏
+  // 这也是 Android TV 的标准 UX — 在主界面按返回应该退出应用
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    const backAction = () => {
+      // 这个 handler 的优先级最低（在 _layout.tsx 中注册）
+      // 只有当没有其他页面的 BackHandler 响应时才会执行
+      // 即用户已经在根路由上
+      logger.info('[ROOT_BACK] User pressed back at root - exiting app to prevent stale ExoPlayer state');
+      BackHandler.exitApp();
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => backHandler.remove();
+  }, []);
 
   if (!loaded && !error) {
     return null;
