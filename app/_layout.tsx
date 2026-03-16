@@ -79,40 +79,6 @@ export default function RootLayout() {
     }
   }, [remoteInputEnabled, startServer, stopServer, responsiveConfig.deviceType]);
 
-  // 关键修复: 在 TV 设备的根路由上按返回键时，彻底杀掉进程
-  // BackHandler.exitApp() 只会 finish Activity，进程还在
-  // NativeModules.AppExit.forceKill() 调用 Process.killProcess() 真正杀进程
-  // 这可以防止 ExoPlayer 的 MediaCodec 状态在进程复用时被损坏
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-
-    const backAction = () => {
-      // 只有在根路由（index 页面）时才拦截返回键并杀进程
-      // segments 为空数组或第一个元素是 index 时表示在根页面
-      // 其他页面返回 false，让 Stack navigator 正常处理导航
-      const isAtRoot = segments.length === 0 ||
-        (segments.length === 1 && segments[0] === '(tabs)') ||
-        (segments.length === 1 && segments[0] === 'index');
-
-      if (!isAtRoot) {
-        // 不在根路由，不拦截，让默认导航处理
-        return false;
-      }
-
-      logger.info('[ROOT_BACK] User pressed back at root - force killing process');
-
-      try {
-        NativeModules.AppExit?.forceKill();
-      } catch (e) {
-        logger.warn('[ROOT_BACK] Native AppExit module not available, falling back to exitApp');
-        BackHandler.exitApp();
-      }
-      return true;
-    };
-
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
-    return () => backHandler.remove();
-  }, [segments]);
 
   if (!loaded && !error) {
     return null;
