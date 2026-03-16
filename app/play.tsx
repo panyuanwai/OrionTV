@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useCallback, memo, useMemo, useState } from "react";
+import React, { useEffect, useRef, useCallback, memo, useMemo } from "react";
 import { StyleSheet, TouchableOpacity, BackHandler, AppState, AppStateStatus, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { Video, Audio, ResizeMode } from "expo-av";
+import { Video } from "expo-av";
 import { useKeepAwake } from "expo-keep-awake";
 import { ThemedView } from "@/components/ThemedView";
 import { PlayerControls } from "@/components/PlayerControls";
@@ -16,6 +16,7 @@ import { useTVRemoteHandler } from "@/hooks/useTVRemoteHandler";
 import Toast from "react-native-toast-message";
 import usePlayerStore, { selectCurrentEpisode } from "@/stores/playerStore";
 import { useResponsiveLayout } from "@/hooks/useResponsiveLayout";
+import { useVideoHandlers } from "@/hooks/useVideoHandlers";
 import Logger from '@/utils/Logger';
 
 const logger = Logger.withTag('PlayScreen');
@@ -24,7 +25,8 @@ const logger = Logger.withTag('PlayScreen');
 const LoadingContainer = memo(
   ({ style, currentEpisode }: { style: any; currentEpisode: { url: string; title: string } | undefined }) => {
     logger.info(
-      `[PERF] Video component NOT rendered - waiting for valid URL. currentEpisode: ${!!currentEpisode}, url: ${currentEpisode?.url ? "exists" : "missing"
+      `[PERF] Video component NOT rendered - waiting for valid URL. currentEpisode: ${!!currentEpisode}, url: ${
+        currentEpisode?.url ? "exists" : "missing"
       }`
     );
     return (
@@ -46,10 +48,12 @@ const createResponsiveStyles = (deviceType: string) => {
     container: {
       flex: 1,
       backgroundColor: "black",
+      // 移动端和平板端可能需要状态栏处理
       ...(isMobile || isTablet ? { paddingTop: 0 } : {}),
     },
     videoContainer: {
       ...StyleSheet.absoluteFillObject,
+      // 为触摸设备添加更多的交互区域
       ...(isMobile || isTablet ? { zIndex: 1 } : {}),
     },
     videoPlayer: {
@@ -69,15 +73,6 @@ export default function PlayScreen() {
   const videoRef = useRef<Video>(null);
   const router = useRouter();
   useKeepAwake();
-
-  // 关键修复: Video 组件始终挂载（无源），然后手动 loadAsync
-  // 这样我们可以完全控制 ExoPlayer 的生命周期
-  const [manualLoadDone, setManualLoadDone] = useState(false);
-  const appStateRef = useRef(AppState.currentState);
-  const isNavigatingBack = useRef(false);
-
-  // 用于强制重建 Video 组件的 key
-  const [videoKey, setVideoKey] = useState(0);
 
   // 响应式布局配置
   const { deviceType } = useResponsiveLayout();
@@ -105,102 +100,36 @@ export default function PlayScreen() {
   const {
     isLoading,
     showControls,
+    // showNextEpisodeOverlay,
     initialPosition,
     introEndTime,
     playbackRate,
     setVideoRef,
     handlePlaybackStatusUpdate,
     setShowControls,
+    // setShowNextEpisodeOverlay,
     reset,
     loadVideo,
   } = usePlayerStore();
   const currentEpisode = usePlayerStore(selectCurrentEpisode);
 
-  // TV遥控器处理
+  // 使用Video事件处理hook
+  const { videoProps } = useVideoHandlers({
+    videoRef,
+    currentEpisode,
+    initialPosition,
+    introEndTime,
+    playbackRate,
+    handlePlaybackStatusUpdate,
+    deviceType,
+    detail: detail || undefined,
+  });
+
+  // TV遥控器处理 - 总是调用hook，但根据设备类型决定是否使用结果
   const tvRemoteHandler = useTVRemoteHandler();
 
-  // 优化的动态样式
+  // 优化的动态样式 - 使用useMemo避免重复计算
   const dynamicStyles = useMemo(() => createResponsiveStyles(deviceType), [deviceType]);
-
-  // 关键修复: 手动 loadAsync 而非通过 source prop
-  // 这样可以在加载前重置 Audio 引擎，确保 ExoPlayer 获得干净的状态
-  useEffect(() => {
-    if (!currentEpisode?.url || !videoRef.current || manualLoadDone) return;
-
-    let cancelled = false;
-
-    const doManualLoad = async () => {
-      logger.info(`[MANUAL_LOAD] Starting manual load for: ${currentEpisode.url.substring(0, 80)}...`);
-
-      try {
-        // 步骤1: 重置 Audio 引擎 — 清除进程级的音频会话状态
-        // 这是解决 Activity 重建后 MediaCodec 损坏的关键
-        logger.info(`[MANUAL_LOAD] Step 1: Resetting Audio engine`);
-        await Audio.setAudioModeAsync({
-          shouldDuckAndroid: true,
-          playThroughEarpieceAndroid: false,
-        });
-
-        if (cancelled) return;
-
-        // 步骤2: 确保 Video 组件的旧内容被完全清除
-        logger.info(`[MANUAL_LOAD] Step 2: Unloading any stale content`);
-        try {
-          await videoRef.current?.unloadAsync();
-        } catch (e) {
-          // 忽略 — 可能没有之前的内容
-        }
-
-        if (cancelled) return;
-
-        // 步骤3: 等待 Android 系统释放硬件解码器
-        logger.info(`[MANUAL_LOAD] Step 3: Waiting for hardware decoder release`);
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        if (cancelled || !videoRef.current) return;
-
-        // 步骤4: 手动加载视频
-        const jumpPosition = initialPosition || introEndTime || 0;
-        logger.info(`[MANUAL_LOAD] Step 4: Loading video with position ${jumpPosition}ms`);
-
-        await videoRef.current.loadAsync(
-          { uri: currentEpisode.url },
-          {
-            positionMillis: jumpPosition,
-            shouldPlay: true,
-            rate: playbackRate,
-            progressUpdateIntervalMillis: 1000,
-          }
-        );
-
-        if (cancelled) return;
-
-        logger.info(`[MANUAL_LOAD] Video loaded successfully!`);
-        setManualLoadDone(true);
-        usePlayerStore.setState({ isLoading: false });
-
-      } catch (error: any) {
-        if (cancelled) return;
-        logger.error(`[MANUAL_LOAD] Failed to load video:`, error);
-
-        // 如果加载失败，尝试切换播放源
-        const errorStr = error?.toString() || '';
-        if (errorStr.includes('SSL') || errorStr.includes('Certificate')) {
-          usePlayerStore.getState().handleVideoError('ssl', currentEpisode.url);
-        } else if (errorStr.includes('Http') || errorStr.includes('IO') || errorStr.includes('Socket')) {
-          usePlayerStore.getState().handleVideoError('network', currentEpisode.url);
-        } else {
-          usePlayerStore.getState().handleVideoError('other', currentEpisode.url);
-        }
-      }
-    };
-
-    doManualLoad();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentEpisode?.url, manualLoadDone, initialPosition, introEndTime, playbackRate]);
 
   useEffect(() => {
     const perfStart = performance.now();
@@ -208,17 +137,18 @@ export default function PlayScreen() {
 
     setVideoRef(videoRef);
     if (source && id && title) {
+      logger.info(`[PERF] Calling loadVideo with episodeIndex: ${episodeIndex}, position: ${position}`);
       loadVideo({ source, id, episodeIndex, position, title });
+    } else {
+      logger.info(`[PERF] Missing required params - source: ${!!source}, id: ${!!id}, title: ${!!title}`);
     }
 
     const perfEnd = performance.now();
     logger.info(`[PERF] PlayScreen useEffect END - took ${(perfEnd - perfStart).toFixed(2)}ms`);
 
     return () => {
-      logger.info(`[CLEANUP] PlayScreen unmounting`);
-      // 同步调用 reset — 不需要等待 unloadAsync，
-      // 因为 Video 组件卸载时 expo-av 会自动释放原生资源
-      reset();
+      logger.info(`[PERF] PlayScreen unmounting - calling reset()`);
+      reset(); // Reset state when component unmounts
     };
   }, [episodeIndex, source, position, setVideoRef, reset, loadVideo, id, title]);
 
@@ -231,68 +161,35 @@ export default function PlayScreen() {
     }
   }, [deviceType, tvRemoteHandler, setShowControls, showControls]);
 
-  // AppState 监听: 后台恢复时完全重建 Video
   useEffect(() => {
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      const prevState = appStateRef.current;
-      appStateRef.current = nextAppState;
-
       if (nextAppState === "background" || nextAppState === "inactive") {
-        logger.info(`[APPSTATE] Going to background, pausing`);
-        videoRef.current?.pauseAsync().catch(() => { });
-      } else if (
-        nextAppState === "active" &&
-        (prevState === "background" || prevState === "inactive")
-      ) {
-        // 关键修复: 从后台恢复时，完全重建 Video 组件
-        // 通过改变 key 强制 React 销毁旧组件并创建新组件
-        // 再通过 manualLoadDone=false 触发重新加载
-        logger.info(`[APPSTATE] Returning from background - forcing Video recreation`);
-        setManualLoadDone(false);
-        setVideoKey(prev => prev + 1);
+        videoRef.current?.pauseAsync();
       }
     };
 
     const subscription = AppState.addEventListener("change", handleAppStateChange);
-    return () => subscription.remove();
+
+    return () => {
+      subscription.remove();
+    };
   }, []);
 
-  // 返回键处理: 先清理再导航
   useEffect(() => {
     const backAction = () => {
       if (showControls) {
         setShowControls(false);
         return true;
       }
-
-      if (isNavigatingBack.current) return true;
-      isNavigatingBack.current = true;
-
-      // 异步清理后导航
-      (async () => {
-        try {
-          if (videoRef.current) {
-            await videoRef.current.pauseAsync().catch(() => { });
-            await videoRef.current.stopAsync().catch(() => { });
-            await videoRef.current.unloadAsync().catch(() => { });
-            // 等待硬件解码器释放
-            await new Promise(r => setTimeout(r, 300));
-          }
-        } catch (e) {
-          logger.warn(`[BACK] Cleanup error:`, e);
-        }
-        router.back();
-        isNavigatingBack.current = false;
-      })();
-
+      router.back();
       return true;
     };
 
     const backHandler = BackHandler.addEventListener("hardwareBackPress", backAction);
+
     return () => backHandler.remove();
   }, [showControls, setShowControls, router]);
 
-  // 播放超时检测
   useEffect(() => {
     let timeoutId: NodeJS.Timeout | null = null;
 
@@ -302,11 +199,13 @@ export default function PlayScreen() {
           usePlayerStore.setState({ isLoading: false });
           Toast.show({ type: "error", text1: "播放超时，请重试" });
         }
-      }, 60000);
+      }, 60000); // 1 minute
     }
 
     return () => {
-      if (timeoutId) clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     };
   }, [isLoading]);
 
@@ -320,19 +219,11 @@ export default function PlayScreen() {
         activeOpacity={1}
         style={dynamicStyles.videoContainer}
         onPress={onScreenPress}
-        disabled={deviceType !== "tv" && showControls}
+        disabled={deviceType !== "tv" && showControls} // 移动端和平板端在显示控制条时禁用触摸
       >
-        {/* 关键修复: Video 组件始终挂载（不依赖 URL），使用 key 控制重建 */}
-        {/* source 不通过 prop 传入，而是通过 loadAsync 手动加载 */}
+        {/* 条件渲染Video组件：只有在有有效URL时才渲染 */}
         {currentEpisode?.url ? (
-          <Video
-            key={`video-${videoKey}`}
-            ref={videoRef}
-            style={dynamicStyles.videoPlayer}
-            resizeMode={ResizeMode.CONTAIN}
-            onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-            useNativeControls={deviceType !== 'tv'}
-          />
+          <Video ref={videoRef} style={dynamicStyles.videoPlayer} {...videoProps} />
         ) : (
           <LoadingContainer style={dynamicStyles.loadingContainer} currentEpisode={currentEpisode} />
         )}
@@ -343,11 +234,14 @@ export default function PlayScreen() {
 
         <SeekingBar />
 
+        {/* 只在Video组件存在且正在加载时显示加载动画覆盖层 */}
         {currentEpisode?.url && isLoading && (
           <View style={dynamicStyles.loadingContainer}>
             <VideoLoadingAnimation showProgressBar />
           </View>
         )}
+
+        {/* <NextEpisodeOverlay visible={showNextEpisodeOverlay} onCancel={() => setShowNextEpisodeOverlay(false)} /> */}
       </TouchableOpacity>
 
       <EpisodeSelectionModal />
