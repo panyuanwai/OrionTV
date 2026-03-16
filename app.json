@@ -29,8 +29,7 @@
           }
         }
       ],
-      "expo-router",
-      "./plugins/withAppExitPackage"
+      "expo-router"
     ],
     "experiments": {
       "typedRoutes": true
