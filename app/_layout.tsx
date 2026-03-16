@@ -1,6 +1,7 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { useFonts } from "expo-font";
-import { Stack } from "expo-router";
+import { Stack, useSegments } from "expo-router";
+
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { Platform, View, StyleSheet, BackHandler, NativeModules } from "react-native";
@@ -33,6 +34,7 @@ export default function RootLayout() {
   const { checkLoginStatus } = useAuthStore();
   const { checkForUpdate, lastCheckTime } = useUpdateStore();
   const responsiveConfig = useResponsiveLayout();
+  const segments = useSegments();
 
   useEffect(() => {
     const initializeApp = async () => {
@@ -85,15 +87,23 @@ export default function RootLayout() {
     if (Platform.OS !== 'android') return;
 
     const backAction = () => {
-      // 这个 handler 的优先级最低（在 _layout.tsx 中注册）
-      // 只有当没有其他页面的 BackHandler 响应时才会执行
-      // 即用户已经在根路由上
+      // 只有在根路由（index 页面）时才拦截返回键并杀进程
+      // segments 为空数组或第一个元素是 index 时表示在根页面
+      // 其他页面返回 false，让 Stack navigator 正常处理导航
+      const isAtRoot = segments.length === 0 ||
+        (segments.length === 1 && segments[0] === '(tabs)') ||
+        (segments.length === 1 && segments[0] === 'index');
+
+      if (!isAtRoot) {
+        // 不在根路由，不拦截，让默认导航处理
+        return false;
+      }
+
       logger.info('[ROOT_BACK] User pressed back at root - force killing process');
 
       try {
         NativeModules.AppExit?.forceKill();
       } catch (e) {
-        // 如果原生模块不可用，回退到 exitApp
         logger.warn('[ROOT_BACK] Native AppExit module not available, falling back to exitApp');
         BackHandler.exitApp();
       }
@@ -102,7 +112,7 @@ export default function RootLayout() {
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
     return () => backHandler.remove();
-  }, []);
+  }, [segments]);
 
   if (!loaded && !error) {
     return null;
