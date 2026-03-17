@@ -70,6 +70,8 @@ yarn android-tv
 
 - 1.2.x 以上版本需配合 [MoonTV](https://github.com/senshinya/MoonTV) 使用。
 
+## 📚 已知问题与底层修复
+- **TV 端 ExoPlayer 后台卡帧问题**: 已在底层 `MainActivity.kt` 层面彻底修复。当退出应用时强制销毁 Dalvik 虚拟机（规避 Android 12 后台挂起机制），每次都是纯净冷启动。详情请见 [深入解析: ExoPlayer 卡帧与原生进程强制清理](./docs/exoplayer_freeze_fix.md)。
 
 ## 📜 主要脚本
 
