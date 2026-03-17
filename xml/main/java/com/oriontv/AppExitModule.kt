@@ -23,6 +23,7 @@ class AppExitModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         
         android.os.Process.killProcess(android.os.Process.myPid())
         System.exit(0)
+        Runtime.getRuntime().halt(0)
     }
 
     override fun onHostResume() {
