@@ -68,16 +68,10 @@ export default function HomeScreen() {
           return true; // 拦截返回事件，不退出
         }
 
-        // 两次返回键间隔小于2秒，彻底杀死进程退出应用
-        // 避免 Android TV 仅将应用退到后台导致 ExoPlayer 状态残留
-        try {
-          if (!NativeModules.AppExit) {
-            throw new Error("AppExit module is null");
-          }
-          NativeModules.AppExit.forceKill();
-        } catch (e) {
-          BackHandler.exitApp();
-        }
+        // 两次返回键间隔小于2秒，退出应用
+        // 通过我们在原生 MainActivity.kt 中重写的 invokeDefaultOnBackPressed()
+        // 这个方法现在会彻底杀死进程，而不是仅退到后台
+        BackHandler.exitApp();
         return true;
       };
 
