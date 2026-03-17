@@ -21,6 +21,6 @@ function copyDir(src, dest) {
     }
 }
 
-console.log('Copying xml/ to android/app/src/ ...');
-copyDir(path.join(__dirname, '../xml'), path.join(__dirname, '../android/app/src'));
+console.log('Copying xml/ to android/app/src/main/ ...');
+copyDir(path.join(__dirname, '../xml'), path.join(__dirname, '../android/app/src/main'));
 console.log('Copy complete.');

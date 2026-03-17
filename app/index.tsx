@@ -71,7 +71,10 @@ export default function HomeScreen() {
         // 两次返回键间隔小于2秒，彻底杀死进程退出应用
         // 避免 Android TV 仅将应用退到后台导致 ExoPlayer 状态残留
         try {
-          NativeModules.AppExit?.forceKill();
+          if (!NativeModules.AppExit) {
+            throw new Error("AppExit module is null");
+          }
+          NativeModules.AppExit.forceKill();
         } catch (e) {
           BackHandler.exitApp();
         }
